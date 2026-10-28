@@ -156,3 +156,8 @@ with the usual key. Then commit `release/EtherShare.apk` and `release/notes.md` 
 and push that commit as a `release/v1.1` branch (not to `main`). The Release workflow builds the
 PC program, tags the commit `v1.1`, publishes the release with the APK and the PC downloads, and
 deletes the branch; the app's Check for updates finds it.
+
+## 📄 License
+
+EtherShare's code is released under the [MIT License](LICENSE). The PC program includes
+[gVisor](https://github.com/google/gvisor), which keeps its own Apache 2.0 license (see 🙏 Credits).
