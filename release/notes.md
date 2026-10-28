@@ -1,7 +1,7 @@
-🔌 EtherShare 1.0: your PC's wired internet on the AYN Thor, over the USB-C cable.
+⚡ EtherShare 1.0.1: the speed test works.
 
-## ✨ What's new in 1.0
-- 🎉 **First release:** plug the Thor into your PC and every app on it uses the PC's ethernet instead of Wi-Fi, with no root and nothing to set up on the PC's network
+## ✨ What's new in 1.0.1
+- ⚡ **Speed test fixed:** it stopped with "HTTP 403" because Cloudflare's test server turns apps away. It now uses Tele2's public speed test server, and ping is the time to reach Cloudflare's 1.1.1.1
 
 ---
 
@@ -19,9 +19,13 @@ EtherShare gives the AYN Thor your PC's wired internet over USB, through a small
 - 🔄 **Updates:** check, see what's new, and install from Settings
 
 ## 📜 Release history
+- **1.0.1:** the speed test works
 - **1.0:** first release: the PC's wired internet over USB, live speeds, a speed test and the PC program for Windows, Mac and Linux
 
 ## 📲 Install
+Already have it? In EtherShare, open Settings > **Check for updates**, or download `EtherShare.apk` below and open it on the Thor. The PC program hasn't changed, so keep the one you have.
+
+New to EtherShare?
 1. Download `EtherShare.apk` below, open it on the Thor to install, and turn on **USB debugging** (Settings > About > tap Build number 7 times, then Developer options > USB debugging).
 2. On your PC, download the file for it below: `EtherShare-Windows.exe`, `EtherShare-Mac-AppleSilicon.zip`, `EtherShare-Mac-Intel.zip` or `EtherShare-Linux.zip`, and run it.
 3. Plug the Thor into the PC, tap **Allow** on the USB debugging prompt and **OK** on the VPN prompt. Leave the PC window open while you use it.
