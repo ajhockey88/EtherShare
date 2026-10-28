@@ -15,13 +15,14 @@ import java.util.Random;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * A quick speed test against Cloudflare's speed test servers (the ones speed.cloudflare.com
- * uses): ping, then several parallel downloads, then uploads, each for a few seconds. Only runs
- * when tapped. Results are kept separately for the cable and for Wi-Fi, to compare the two.
+ * A quick speed test: ping (connection set-up time to Cloudflare's 1.1.1.1), then several
+ * parallel downloads and uploads against Tele2's public speed test server
+ * (speedtest.tele2.net), each for a few seconds. Only runs when tapped. Results are kept
+ * separately for the cable and for Wi-Fi, to compare the two.
  */
 final class SpeedTest {
-    private static final String DOWN = "https://speed.cloudflare.com/__down?bytes=";
-    private static final String UP = "https://speed.cloudflare.com/__up";
+    private static final String DOWN = "http://speedtest.tele2.net/100MB.zip";
+    private static final String UP = "http://speedtest.tele2.net/upload.php";
     private static final int STREAMS = 4;
     private static final long PHASE_MS = 7000;
 
@@ -97,28 +98,22 @@ final class SpeedTest {
         }, "EtherShare speed test").start();
     }
 
-    /** The middle of five small requests' round trips, after one to set up the connection. */
+    /** The middle of five TCP connection set-ups to 1.1.1.1, in ms: one round trip each. */
     private double ping() throws IOException {
         double[] times = new double[5];
-        fetch(DOWN + "0");
         for (int i = 0; i < times.length; i++) {
+            java.net.Socket so = new java.net.Socket();
             long t = SystemClock.elapsedRealtimeNanos();
-            fetch(DOWN + "0");
-            times[i] = (SystemClock.elapsedRealtimeNanos() - t) / 1e6;
+            try {
+                so.connect(new java.net.InetSocketAddress("1.1.1.1", 443), 5000);
+                times[i] = (SystemClock.elapsedRealtimeNanos() - t) / 1e6;
+            } finally {
+                so.close();
+            }
             progress("Ping", times[i]);
         }
         Arrays.sort(times);
         return times[times.length / 2];
-    }
-
-    private static void fetch(String url) throws IOException {
-        HttpURLConnection c = open(url);
-        InputStream in = c.getInputStream();
-        byte[] b = new byte[4096];
-        while (in.read(b) > 0) {
-            // drain
-        }
-        in.close();
     }
 
     /** Several streams at once for PHASE_MS; the speed counts from the end of the first second. */
@@ -162,7 +157,7 @@ final class SpeedTest {
     }
 
     private static void downloadOnce(AtomicLong bytes, long end) throws IOException {
-        HttpURLConnection c = open(DOWN + (100 * 1000 * 1000));
+        HttpURLConnection c = open(DOWN);
         InputStream in = c.getInputStream();
         byte[] b = new byte[64 * 1024];
         try {
@@ -183,6 +178,7 @@ final class SpeedTest {
         c.setDoOutput(true);
         c.setRequestMethod("POST");
         c.setRequestProperty("Content-Type", "application/octet-stream");
+        c.setRequestProperty("User-Agent", "EtherShare");
         int size = 25 * 1000 * 1000;
         c.setFixedLengthStreamingMode(size);
         byte[] b = new byte[64 * 1024];

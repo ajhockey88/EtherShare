@@ -21,8 +21,10 @@
         <package android:name="moe.shizuku.privileged.api" />
     </queries>
 
+    <!-- usesCleartextTraffic: the speed test's server (speedtest.tele2.net) is plain HTTP. -->
     <application
         android:allowBackup="true"
+        android:usesCleartextTraffic="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
