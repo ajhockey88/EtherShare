@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/logo.png" width="160" alt="EtherShare logo: an ethernet port wired to a USB-C plug"></p>
+<p align="center"><img src="docs/logo.png" width="160" alt="EtherShare logo: a speed gauge pinned high above a USB-C plug"></p>
 
 # EtherShare
 
@@ -41,6 +41,9 @@ replace them.
 
 Plug the Thor into the PC with EtherShare running on the PC. That's it: the first time, Android
 asks to allow EtherShare's VPN; after that it connects by itself whenever you plug in.
+
+Closing EtherShare only closes its screens: the connection keeps running in the background, so
+every app on the Thor uses the cable until you unplug or tap **Disconnect**.
 
 The bar along the top has 🔌 **Connect** / ⏹️ **Disconnect**, ⚡ **Speed test**, ⚙️ **Settings** and
 ✖️ **Close**. The notification has a **Disconnect** button too.
