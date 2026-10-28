@@ -1,0 +1,20 @@
+name: Test
+
+# Runs the PC program's tunnel tests (a simulated Thor downloading and uploading through the
+# relay) and builds it for every system, on each pull request.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: desktop/go.mod
+          cache-dependency-path: desktop/go.sum
+      - run: cd desktop && go vet ./... && go test -v ./... && ./build.sh
