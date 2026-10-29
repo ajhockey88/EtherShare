@@ -1,7 +1,7 @@
 ⚡ EtherShare 1.1.3: the speed test uses HTTPS.
 
 ## ✨ What's new in 1.1.3
-- ⚡ **Speed test reaches its servers:** 1.1.2 said "couldn't reach any speed test server" because it used plain HTTP, which some PCs and networks block or hold up while HTTPS gets through. It now uses HTTPS, like your browser. If it still can't reach a server, the message says which server and why
+- ⚡ **Speed test reaches its servers:** 1.1.2 could say "couldn't reach any speed test server". The likely cause was its plain HTTP connections, which some PCs and networks block or hold up while HTTPS gets through. It now uses HTTPS, like your browser. If it still can't reach a server, the message says which server and why
 - 📈 From 1.1.2: the live download and upload numbers show the average of the last 3 seconds, so they no longer jump to 0 between bursts
 
 ---
