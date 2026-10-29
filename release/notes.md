@@ -1,8 +1,8 @@
-⚡ EtherShare 1.1.2: the speed test works again, and steadier speed numbers.
+⚡ EtherShare 1.1.3: the speed test uses HTTPS.
 
-## ✨ What's new in 1.1.2
-- ⚡ **Speed test fixed:** it could read 0.00 when its one server, in Sweden, was slow to answer: the test ran out of time before any data arrived. It now picks the nearest of several public test servers (Tele2 and Linode's, in North America, Europe and Asia), starts timing only once data is moving, and says what went wrong if a server doesn't answer
-- 📈 **Steadier live speeds:** traffic comes in bursts, so the download and upload numbers jumped between 0 and full speed every second. They now show the average of the last 3 seconds. The graph still shows every second
+## ✨ What's new in 1.1.3
+- ⚡ **Speed test reaches its servers:** 1.1.2 said "couldn't reach any speed test server" because it used plain HTTP, which some PCs and networks block or hold up while HTTPS gets through. It now uses HTTPS, like your browser. If it still can't reach a server, the message says which server and why
+- 📈 From 1.1.2: the live download and upload numbers show the average of the last 3 seconds, so they no longer jump to 0 between bursts
 
 ---
 
@@ -20,6 +20,7 @@ EtherShare gives the AYN Thor your PC's wired internet over USB, through a small
 - 🔄 **Updates:** check, see what's new, and install from Settings
 
 ## 📜 Release history
+- **1.1.3:** the speed test uses HTTPS, so it reaches its servers
 - **1.1.2:** the speed test works again (nearest server), and steadier live speed numbers
 - **1.1.1:** game streams lose far fewer packets (bigger buffers for UDP in the PC program)
 - **1.1:** a much faster cable (8 adb connections at once), and the connect screen scrolls
