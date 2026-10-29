@@ -16,14 +16,19 @@ import java.util.Arrays;
 import java.util.Random;
 import java.util.concurrent.atomic.AtomicLong;
 
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.SSLSocket;
+import javax.net.ssl.SSLSocketFactory;
+
 /**
  * A quick speed test. It picks the nearest of several public speed test servers (the one that
  * answers a connection fastest), measures ping to it, then runs several parallel downloads from
  * it and uploads to Tele2's public server (speedtest.tele2.net), each for a few seconds. Only
  * runs when tapped. Results are kept separately for the cable and for Wi-Fi, to compare.
  *
- * It speaks plain HTTP over IPv4 sockets itself: a far-away server or an IPv6 address that
- * doesn't answer used to stall Java's HTTP client for longer than the test, which read 0.
+ * It speaks HTTPS over IPv4 sockets itself: a far-away server or an IPv6 address that doesn't
+ * answer used to stall Java's HTTP client for longer than the test, which read 0. Plain HTTP
+ * (port 80) didn't get through on Anthony's PC at all, so it's HTTPS only.
  */
 final class SpeedTest {
     /** host/path of a large file to download; Linode's are for exactly this. */
@@ -41,6 +46,7 @@ final class SpeedTest {
             "speedtest.syd1.linode.com/100MB-syd1.bin",
     };
     private static final String UP = "speedtest.tele2.net/upload.php";
+    private static final int PORT = 443;
     private static final int STREAMS = 6;
     /** Each phase measures for this long, starting a second after the first bytes move. */
     private static final long MEASURE_MS = 6000;
@@ -142,27 +148,34 @@ final class SpeedTest {
         throw new IOException(host + " has no IPv4 address");
     }
 
-    /** The download server that answers a connection fastest, tried all at once. */
+    /** The download server that answers fastest, tried all at once. */
     private Target nearest() throws Exception {
         progress("Ping", 0);
         final Target[] best = new Target[1];
         final long[] bestNs = {Long.MAX_VALUE};
+        final String[] why = new String[1];
         Thread[] probes = new Thread[DOWN.length];
         for (int i = 0; i < DOWN.length; i++) {
             final String url = DOWN[i];
             probes[i] = new Thread(new Runnable() {
                 @Override public void run() {
                     try {
-                        InetAddress ip = ipv4(host(url));
-                        long ns = connectNs(ip);
+                        Target t = new Target(url, ipv4(host(url)));
+                        // A full HTTPS set-up, so a server without working HTTPS drops out here.
+                        long start = SystemClock.elapsedRealtimeNanos();
+                        open(t).close();
+                        long ns = SystemClock.elapsedRealtimeNanos() - start;
                         synchronized (best) {
                             if (ns < bestNs[0]) {
                                 bestNs[0] = ns;
-                                best[0] = new Target(url, ip);
+                                best[0] = t;
                             }
                         }
-                    } catch (IOException ignored) {
+                    } catch (IOException e) {
                         // Gone or unreachable: one of the others will do.
+                        synchronized (best) {
+                            if (why[0] == null) why[0] = host(url) + ": " + e.getMessage();
+                        }
                     }
                 }
             });
@@ -170,7 +183,7 @@ final class SpeedTest {
         }
         for (Thread t : probes) t.join(6000);
         synchronized (best) {
-            if (best[0] == null) throw new IOException("couldn't reach any speed test server");
+            if (best[0] == null) throw new IOException("couldn't reach any speed test server (" + why[0] + ")");
             return best[0];
         }
     }
@@ -180,7 +193,7 @@ final class SpeedTest {
         Socket so = new Socket();
         long t = SystemClock.elapsedRealtimeNanos();
         try {
-            so.connect(new InetSocketAddress(ip, 80), 3000);
+            so.connect(new InetSocketAddress(ip, PORT), 3000);
             return SystemClock.elapsedRealtimeNanos() - t;
         } finally {
             so.close();
@@ -252,11 +265,18 @@ final class SpeedTest {
         return mbps;
     }
 
+    /** A TLS connection to the server, checked against its name like a browser does. */
     private static Socket open(Target t) throws IOException {
         Socket so = new Socket();
-        so.connect(new InetSocketAddress(t.ip, 80), 4000);
+        so.connect(new InetSocketAddress(t.ip, PORT), 4000);
         so.setSoTimeout(5000);
-        return so;
+        String host = host(t.url);
+        SSLSocket tls = (SSLSocket) ((SSLSocketFactory) SSLSocketFactory.getDefault()).createSocket(so, host, PORT, true);
+        SSLParameters p = tls.getSSLParameters();
+        p.setEndpointIdentificationAlgorithm("HTTPS"); // checks the certificate is for host
+        tls.setSSLParameters(p);
+        tls.startHandshake();
+        return tls;
     }
 
     private static void downloadOnce(Target t, AtomicLong bytes, long[] end) throws IOException {
