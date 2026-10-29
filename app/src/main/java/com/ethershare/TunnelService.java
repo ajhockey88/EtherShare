@@ -424,13 +424,15 @@ public class TunnelService extends VpnService {
             long d = bytesDown.get(), u = bytesUp.get();
             if (lastTick != 0) {
                 float secs = Math.max(0.2f, (now - lastTick) / 1000f);
-                downNow = (d - lastDown) / secs;
-                upNow = (u - lastUp) / secs;
                 System.arraycopy(downHistory, 1, downHistory, 0, HISTORY - 1);
                 System.arraycopy(upHistory, 1, upHistory, 0, HISTORY - 1);
-                downHistory[HISTORY - 1] = downNow;
-                upHistory[HISTORY - 1] = upNow;
-                downPeak = Math.max(downPeak, downNow);
+                downHistory[HISTORY - 1] = (d - lastDown) / secs;
+                upHistory[HISTORY - 1] = (u - lastUp) / secs;
+                // Traffic comes in bursts, so one second on its own jumps between 0 and the
+                // top speed: the numbers show the last few seconds' average instead.
+                downNow = average(downHistory);
+                upNow = average(upHistory);
+                downPeak = Math.max(downPeak, downHistory[HISTORY - 1]);
             }
             sessionBytes = d + u - sessionStartBytes;
             lastDown = d;
@@ -443,6 +445,14 @@ public class TunnelService extends VpnService {
             main.postDelayed(this, 1000);
         }
     };
+
+    private static final int SMOOTH = 3;
+
+    private static float average(float[] history) {
+        float sum = 0;
+        for (int i = HISTORY - SMOOTH; i < HISTORY; i++) sum += history[i];
+        return sum / SMOOTH;
+    }
 
     // ---- Notification ---------------------------------------------------------------------
 
