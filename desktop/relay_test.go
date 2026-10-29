@@ -20,6 +20,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
+	"gvisor.dev/gvisor/pkg/waiter"
 )
 
 // fakeThor stands in for the Thor's VPN: a TCP/IP stack of its own (as Android has) whose
@@ -398,5 +399,63 @@ func TestOldAppIsTurnedAway(t *testing.T) {
 	go a.Write([]byte{'E', 'T', 'H', 'S', 99})
 	if err := Serve(b, "pc", &Stats{}, pcDNS); err == nil {
 		t.Fatal("accepted a newer protocol version")
+	}
+}
+
+// A game stream sends each frame as a burst of packets back to back. The relay must pass a
+// whole burst (a 150 KB video keyframe is 108 packets of 1392 bytes) without losing any: UDP
+// has no resend, so a packet dropped in the relay's socket or gVisor buffers is lost for good.
+func TestUDPBurstSurvivesTheRelay(t *testing.T) {
+	const packets, size = 108, 1392
+	game, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer game.Close()
+	// The "game": waits for the Thor's first packet, then answers with one tight burst.
+	go func() {
+		buf := make([]byte, 2048)
+		_, from, err := game.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		pkt := make([]byte, size)
+		for i := 0; i < packets; i++ {
+			binary.BigEndian.PutUint32(pkt, uint32(i))
+			game.WriteTo(pkt, from)
+		}
+	}()
+
+	thor, _ := startRelay(t, "")
+	// An endpoint with room for the burst, as an Android socket has; DialUDP would give it
+	// gVisor's 32 KiB default and the test would measure the fake Thor instead of the relay.
+	var wq waiter.Queue
+	ep, tcpErr := thor.s.NewEndpoint(udp.ProtocolNumber, header.IPv4ProtocolNumber, &wq)
+	if tcpErr != nil {
+		t.Fatal(tcpErr)
+	}
+	ep.SocketOptions().SetReceiveBufferSize(4<<20, false)
+	if tcpErr := ep.Connect(gatewayAddr(game.LocalAddr().(*net.UDPAddr).Port)); tcpErr != nil {
+		t.Fatal(tcpErr)
+	}
+	c := gonet.NewUDPConn(&wq, ep)
+	defer c.Close()
+
+	c.Write([]byte("hello"))
+	got := make(map[uint32]bool)
+	buf := make([]byte, 2048)
+	for len(got) < packets {
+		c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, err := c.Read(buf)
+		if err != nil {
+			break
+		}
+		if n != size {
+			t.Fatalf("packet of %d bytes, want %d", n, size)
+		}
+		got[binary.BigEndian.Uint32(buf)] = true
+	}
+	if len(got) != packets {
+		t.Fatalf("%d of %d packets of the burst arrived", len(got), packets)
 	}
 }

@@ -502,6 +502,12 @@ func splice(local *gonet.TCPConn, remote *net.TCPConn) {
 const (
 	udpIdle = 2 * time.Minute
 	dnsIdle = 15 * time.Second
+
+	// A game stream sends a frame as one burst: a 150 KB video keyframe is over a hundred
+	// packets back to back. The OS default socket buffer (about 64 KB on Windows) and gVisor's
+	// 32 KiB UDP buffers overflow before the pipe below drains them, and UDP has no resend, so
+	// the stream loses packets. 4 MiB is gVisor's largest UDP buffer.
+	udpBuf = 4 << 20
 )
 
 func (t *tunnel) handleUDP(r *udp.ForwarderRequest) bool {
@@ -512,6 +518,8 @@ func (t *tunnel) handleUDP(r *udp.ForwarderRequest) bool {
 	if err != nil {
 		return false
 	}
+	ep.SocketOptions().SetReceiveBufferSize(udpBuf, false)
+	ep.SocketOptions().SetSendBufferSize(udpBuf, false)
 	local := gonet.NewUDPConn(&wq, ep)
 	idle := udpIdle
 	if id.LocalPort == 53 {
@@ -524,6 +532,11 @@ func (t *tunnel) handleUDP(r *udp.ForwarderRequest) bool {
 			return
 		}
 		defer remote.Close()
+		if uc, ok := remote.(*net.UDPConn); ok {
+			// The OS may grant less than asked (Linux caps it at net.core.rmem_max); that's fine.
+			uc.SetReadBuffer(udpBuf)
+			uc.SetWriteBuffer(udpBuf)
+		}
 		// Each side's reads push both deadlines out; a quiet flow ends after idle.
 		touch := func() {
 			at := time.Now().Add(idle)
