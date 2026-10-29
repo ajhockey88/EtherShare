@@ -1,7 +1,7 @@
 ⚡ EtherShare 1.1.2: the speed test works again, and steadier speed numbers.
 
 ## ✨ What's new in 1.1.2
-- ⚡ **Speed test fixed:** it could read 0.00 because the server was slow to answer and the test ran out of time before the first byte arrived. It now picks the nearest of several public test servers (Tele2 and Linode's, in North America, Europe and Asia), starts timing only once data is moving, and says what went wrong if a server doesn't answer
+- ⚡ **Speed test fixed:** it could read 0.00 when its one server, in Sweden, was slow to answer: the test ran out of time before any data arrived. It now picks the nearest of several public test servers (Tele2 and Linode's, in North America, Europe and Asia), starts timing only once data is moving, and says what went wrong if a server doesn't answer
 - 📈 **Steadier live speeds:** traffic comes in bursts, so the download and upload numbers jumped between 0 and full speed every second. They now show the average of the last 3 seconds. The graph still shows every second
 
 ---
