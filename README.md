@@ -132,8 +132,7 @@ The PC program is in [`desktop/`](desktop) (Go); the Android app is in [`app/`](
 
 🔒 EtherShare has no servers and no tracking. Your traffic goes from the Thor through the cable
 to your own PC and out through its connection, nowhere else. The app also checks GitHub for
-updates when it opens, and contacts Tele2's public speed test server (and 1.1.1.1 for the ping) only when you run a speed
-test. The PC program only goes online to download `adb` the first time, if it's missing.
+updates when it opens, and contacts public speed test servers (Tele2's and Linode's) only when you run a speed test. The PC program only goes online to download `adb` the first time, if it's missing.
 
 ## 🙏 Credits
 
