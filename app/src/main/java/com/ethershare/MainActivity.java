@@ -21,6 +21,7 @@ import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -52,7 +53,12 @@ public class MainActivity extends Activity implements TunnelService.Listener {
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
         page.setPadding((int) (12 * d), (int) (72 * d), (int) (12 * d), (int) (8 * d));
-        frame.addView(page, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        // Scrolls when the cards don't fit (the setup steps and the speed test, before connecting).
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setVerticalScrollBarEnabled(false);
+        scroll.addView(page, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        frame.addView(scroll, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         page.addView(statusCard());
         tiles = new LinearLayout(this);
@@ -65,6 +71,7 @@ public class MainActivity extends Activity implements TunnelService.Listener {
         testCard = testCard();
         page.addView(testCard, margins(ViewGroup.LayoutParams.WRAP_CONTENT));
         graph = new GraphView(this, false);
+        graph.setMinimumHeight((int) (110 * d));
         LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
         glp.bottomMargin = (int) (6 * d);
         page.addView(graph, glp);

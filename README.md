@@ -51,9 +51,10 @@ The bar along the top has 🔌 **Connect** / ⏹️ **Disconnect**, ⚡ **Speed 
 🎮 **Gamepad:** **A** connects or disconnects, **X** runs the speed test, **Y** (or Start) opens
 Settings, **B** closes.
 
-**How fast is it?** As fast as the USB link and adb allow, usually a few hundred Mbps, with the
-low, steady ping of a cable. The PC side alone moves about 4 Gbps in tests, so it's never the
-limit. Use a USB 3 port and a cable that carries data (not a charge-only cable).
+**How fast is it?** As fast as the USB link and adb allow. adb sends data in pieces and waits for
+each to arrive before sending the next, which holds a single adb connection to around 90 Mbps,
+so EtherShare uses 8 of them at once. The PC side alone moves several Gbps in tests, so it's
+never the limit. Use a USB 3 port and a cable that carries data (not a charge-only cable).
 
 ## ⚙️ Settings
 
@@ -96,7 +97,8 @@ from this computer"), then **OK** on the VPN prompt. Leave the PC window open wh
 
 🔄 **Updating:** tap **Check for updates** in Settings, or install the newest `EtherShare.apk` from
 [Releases](https://github.com/ajhockey88/EtherShare/releases) over the old one. Update the PC
-program at the same time; the two check they speak the same version.
+program at the same time: older and newer versions still work together, but the newest speed-ups
+need both.
 
 **If it doesn't connect:** make sure the PC window says it found the Thor. If a Windows PC never
 finds it, Windows is missing an ADB driver for the Thor; Google's
@@ -121,6 +123,11 @@ Because the PC makes ordinary connections, it needs no admin rights, drivers or 
 settings. The VPN uses 16 KB packets to cut the per-packet cost over adb, and only talks to adb
 itself: the app checks that whatever answers on the socket is adb before sending anything.
 
+adb carries each connection stop-and-wait (a piece, then a wait for the go-ahead), so one
+connection on its own is slow. The app opens 8 and both sides deal the packets across them in
+turn, numbered, and put them back in order on arrival: the waits overlap, and even one big
+download gets the speed of all 8.
+
 The PC program is in [`desktop/`](desktop) (Go); the Android app is in [`app/`](app).
 
 🔒 EtherShare has no servers and no tracking. Your traffic goes from the Thor through the cable
@@ -142,8 +149,9 @@ standard Gradle files, so it can be opened and built in Android Studio.
 
 `desktop/build.sh` builds the PC program for Windows, macOS and Linux into `desktop/dist/` (needs
 [Go](https://go.dev/dl/)). `cd desktop && go test ./...` runs the tunnel tests: a simulated Thor
-downloads and uploads through the relay, checks that DNS goes to the PC's resolver, and checks
-that refused connections fail fast.
+downloads and uploads through the relay over 8 streams, through a simulated stop-and-wait adb
+link (where 8 streams must beat 1), and over the old single-stream protocol; it also checks
+that DNS goes to the PC's resolver and that refused connections fail fast.
 
 The signing key is not in this repository. `build.sh` reads it from `keystore/ethershare.jks`
 (or `$KEYSTORE`) and creates a new one if missing; an APK signed with a different key has to be
