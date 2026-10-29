@@ -18,13 +18,18 @@ import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 
 import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.DataInputStream;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import java.security.SecureRandom;
+import java.util.Arrays;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -33,8 +38,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * own connection and passes the replies back. Nothing here needs root.
  *
  * The PC's program runs "adb reverse localabstract:ethershare tcp:PORT", so connecting to the
- * abstract socket "ethershare" here reaches it. Each packet travels as a 2-byte length and
- * the packet; see desktop/relay.go for the PC's side.
+ * abstract socket "ethershare" here reaches it. ADB moves each connection stop-and-wait, so
+ * one alone is slow: EtherShare opens STREAMS of them and deals the packets across them,
+ * numbered so the far side can put them back in order. See desktop/relay.go for the PC's
+ * side and the exact format.
  */
 public class TunnelService extends VpnService {
     static final String ACTION_START = "com.ethershare.START";
@@ -45,7 +52,9 @@ public class TunnelService extends VpnService {
 
     private static final String SOCKET = "ethershare";
     private static final byte[] MAGIC = {'E', 'T', 'H', 'S'};
-    private static final int VERSION = 1;
+    private static final int VERSION = 2;
+    /** ADB connections used at once. Older PC programs (version 1) take only one. */
+    private static final int STREAMS = 8;
     /** Big packets mean far fewer of them, which is what decides the speed over ADB. */
     static final int MTU = 16384;
     private static final int SHELL_UID = 2000, ROOT_UID = 0;
@@ -93,7 +102,7 @@ public class TunnelService extends VpnService {
         context.startService(new Intent(context, TunnelService.class).setAction(ACTION_STOP));
     }
 
-    private LocalSocket socket;
+    private volatile LocalSocket[] sockets = new LocalSocket[0];
     private ParcelFileDescriptor tun;
     private Thread worker;
     private volatile boolean stopping;
@@ -120,32 +129,38 @@ public class TunnelService extends VpnService {
         return START_NOT_STICKY;
     }
 
+    /** One ADB connection to the PC, after the hello and welcome. */
+    private static final class Stream {
+        final LocalSocket socket;
+        final DataInputStream in;
+        final OutputStream out;
+        String pcName;
+
+        Stream(LocalSocket socket) throws IOException {
+            this.socket = socket;
+            in = new DataInputStream(new BufferedInputStream(socket.getInputStream(), 256 * 1024));
+            out = socket.getOutputStream();
+        }
+    }
+
     private void connect(String hint) {
         try {
-            LocalSocket s = new LocalSocket();
-            socket = s;
-            s.connect(new LocalSocketAddress(SOCKET, LocalSocketAddress.Namespace.ABSTRACT));
-            // Only adb may be on the other end; any app could open a socket with this name.
-            Credentials peer = s.getPeerCredentials();
-            if (peer == null || (peer.getUid() != SHELL_UID && peer.getUid() != ROOT_UID)) {
-                throw new IOException("something other than the PC answered; unplug and plug in again");
+            long session = new SecureRandom().nextLong();
+            int version = VERSION;
+            Stream first;
+            try {
+                first = openStream(VERSION, session, 0, STREAMS);
+            } catch (IOException e) {
+                // A PC program from before 1.1 hangs up on version 2: talk to it the old way.
+                // (If the PC isn't there at all, this fails the same way and says so.)
+                if (stopping || e instanceof NotAdbException) throw e;
+                version = 1;
+                first = openStream(1, 0, 0, 1);
             }
-            s.setSoTimeout(10000);
-            OutputStream out = s.getOutputStream();
-            InputStream in = s.getInputStream();
-            out.write(new byte[] {MAGIC[0], MAGIC[1], MAGIC[2], MAGIC[3], VERSION});
-            out.flush();
-            DataInputStream din = new DataInputStream(new BufferedInputStream(in, 256 * 1024));
-            byte[] head = new byte[6];
-            din.readFully(head);
-            for (int i = 0; i < 4; i++) {
-                if (head[i] != MAGIC[i]) throw new IOException("the PC didn't answer like EtherShare");
-            }
-            if (head[4] != VERSION) throw new IOException("EtherShare on the PC is a different version; update both");
-            byte[] name = new byte[head[5] & 0xff];
-            din.readFully(name);
-            pcName = name.length > 0 ? new String(name, "UTF-8") : (hint != null ? hint : "your PC");
-            s.setSoTimeout(0);
+            Stream[] streams = new Stream[version == 1 ? 1 : STREAMS];
+            streams[0] = first;
+            for (int i = 1; i < streams.length; i++) streams[i] = openStream(VERSION, session, i, STREAMS);
+            pcName = first.pcName.length() > 0 ? first.pcName : (hint != null ? hint : "your PC");
 
             tun = buildVpn().establish();
             if (tun == null) throw new IOException("Android hasn't allowed EtherShare's VPN yet. Open EtherShare and tap Connect");
@@ -161,12 +176,7 @@ public class TunnelService extends VpnService {
             main.post(ticker);
             registerReceiver(usbState, new IntentFilter("android.hardware.usb.action.USB_STATE"));
 
-            Thread upPump = new Thread(new Runnable() {
-                @Override public void run() { pumpUp(); }
-            }, "EtherShare up");
-            upPump.start();
-            pumpDown(din);
-            disconnect("The PC connection ended. Is the cable plugged in and EtherShare open on the PC?");
+            startPumps(streams, version >= 2);
         } catch (IOException e) {
             if (!stopping) {
                 String msg = e.getMessage();
@@ -178,6 +188,156 @@ public class TunnelService extends VpnService {
         } catch (RuntimeException e) {
             if (!stopping) disconnect("Couldn't start the VPN: " + e.getMessage());
         }
+    }
+
+    private static final class NotAdbException extends IOException {
+        NotAdbException() { super("something other than the PC answered; unplug and plug in again"); }
+    }
+
+    /** Connects one stream and trades hello and welcome; version 1 sends no session. */
+    private Stream openStream(int version, long session, int index, int count) throws IOException {
+        LocalSocket s = new LocalSocket();
+        LocalSocket[] now = Arrays.copyOf(sockets, sockets.length + 1);
+        now[now.length - 1] = s;
+        sockets = now; // so disconnect() closes it
+        if (stopping) throw new IOException("stopped");
+        s.connect(new LocalSocketAddress(SOCKET, LocalSocketAddress.Namespace.ABSTRACT));
+        // Only adb may be on the other end; any app could open a socket with this name.
+        Credentials peer = s.getPeerCredentials();
+        if (peer == null || (peer.getUid() != SHELL_UID && peer.getUid() != ROOT_UID)) {
+            throw new NotAdbException();
+        }
+        s.setSoTimeout(10000);
+        Stream st = new Stream(s);
+        ByteBuffer hello = ByteBuffer.allocate(15).put(MAGIC).put((byte) version);
+        if (version >= 2) hello.putLong(session).put((byte) index).put((byte) count);
+        st.out.write(hello.array(), 0, hello.position());
+        st.out.flush();
+        byte[] head = new byte[6];
+        st.in.readFully(head);
+        for (int i = 0; i < 4; i++) {
+            if (head[i] != MAGIC[i]) throw new IOException("the PC didn't answer like EtherShare");
+        }
+        if (head[4] != version) throw new IOException("EtherShare on the PC is a different version; update both");
+        byte[] name = new byte[head[5] & 0xff];
+        st.in.readFully(name);
+        st.pcName = new String(name, "UTF-8");
+        s.setSoTimeout(0);
+        return st;
+    }
+
+    /** Runs the packets both ways until a stream or the VPN closes, then disconnects. */
+    private void startPumps(final Stream[] streams, final boolean numbered) {
+        final FileOutputStream vpnOut = new FileOutputStream(tun.getFileDescriptor());
+        final Reorder down = new Reorder(new Reorder.Sink() {
+            @Override public void write(byte[] b, int off, int len) throws IOException { vpnOut.write(b, off, len); }
+        });
+        for (int i = 1; i < streams.length; i++) {
+            final Stream st = streams[i];
+            new Thread(new Runnable() {
+                @Override public void run() { pumpDown(st, numbered, down); }
+            }, "EtherShare down " + i).start();
+        }
+        final ArrayBlockingQueue<byte[]>[] queues = queues(numbered ? streams.length : 0);
+        for (int i = 0; i < queues.length; i++) {
+            final Stream st = streams[i];
+            final ArrayBlockingQueue<byte[]> q = queues[i];
+            new Thread(new Runnable() {
+                @Override public void run() { sendLoop(st, q); }
+            }, "EtherShare up " + i).start();
+        }
+        new Thread(new Runnable() {
+            @Override public void run() { pumpUp(streams[0], queues); }
+        }, "EtherShare VPN").start();
+        pumpDown(streams[0], numbered, down);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ArrayBlockingQueue<byte[]>[] queues(int n) {
+        ArrayBlockingQueue<byte[]>[] q = new ArrayBlockingQueue[n];
+        for (int i = 0; i < n; i++) q[i] = new ArrayBlockingQueue<>(256);
+        return q;
+    }
+
+    /**
+     * Thor -> PC: each packet from the VPN. Version 1 (no queues) writes it straight to the one
+     * stream as length + packet; otherwise it gets a number and goes to the streams in turn.
+     */
+    private void pumpUp(Stream only, ArrayBlockingQueue<byte[]>[] queues) {
+        byte[] buf = new byte[MTU + 6];
+        int head = queues.length > 0 ? 6 : 2;
+        int seq = 0, next = 0;
+        try {
+            FileInputStream in = new FileInputStream(tun.getFileDescriptor());
+            while (!stopping) {
+                int n = in.read(buf, head, MTU);
+                if (n <= 0) continue;
+                buf[0] = (byte) (n >> 8);
+                buf[1] = (byte) n;
+                bytesUp.addAndGet(n);
+                if (queues.length == 0) {
+                    only.out.write(buf, 0, n + 2);
+                    continue;
+                }
+                buf[2] = (byte) (seq >> 24);
+                buf[3] = (byte) (seq >> 16);
+                buf[4] = (byte) (seq >> 8);
+                buf[5] = (byte) seq;
+                seq++;
+                byte[] frame = Arrays.copyOf(buf, n + 6);
+                // In turn, skipping a stream that's backed up while another has room.
+                boolean sent = false;
+                for (int k = 0; k < queues.length && !sent; k++) {
+                    if (queues[(next + k) % queues.length].offer(frame)) {
+                        next = (next + k + 1) % queues.length;
+                        sent = true;
+                    }
+                }
+                if (!sent) {
+                    while (!stopping && !queues[next].offer(frame, 500, TimeUnit.MILLISECONDS)) { }
+                    next = (next + 1) % queues.length;
+                }
+            }
+        } catch (IOException | InterruptedException | RuntimeException e) {
+            // The socket or VPN closed.
+        }
+        if (!stopping) disconnect("The PC connection ended. Is the cable plugged in and EtherShare open on the PC?");
+    }
+
+    /** Writes one stream's frames, flushing whenever its queue runs dry. */
+    private void sendLoop(Stream st, ArrayBlockingQueue<byte[]> q) {
+        try {
+            BufferedOutputStream out = new BufferedOutputStream(st.out, 256 * 1024);
+            while (!stopping) {
+                byte[] f = q.poll(500, TimeUnit.MILLISECONDS);
+                if (f == null) continue;
+                out.write(f);
+                if (q.isEmpty()) out.flush();
+            }
+        } catch (IOException | InterruptedException | RuntimeException e) {
+            // The socket closed.
+        }
+        if (!stopping) disconnect("The PC connection ended. Is the cable plugged in and EtherShare open on the PC?");
+    }
+
+    /** PC -> Thor: one packet per write into the VPN, in the PC's order. */
+    private void pumpDown(Stream st, boolean numbered, Reorder down) {
+        byte[] buf = new byte[65536];
+        try {
+            FileOutputStream out = new FileOutputStream(tun.getFileDescriptor());
+            while (!stopping) {
+                int n = st.in.readUnsignedShort();
+                if (n == 0) continue;
+                int seq = numbered ? st.in.readInt() : 0;
+                st.in.readFully(buf, 0, n);
+                bytesDown.addAndGet(n);
+                if (numbered) down.deliver(seq, buf, n);
+                else out.write(buf, 0, n);
+            }
+        } catch (IOException | RuntimeException e) {
+            // Unplugged, or the PC program closed.
+        }
+        if (!stopping) disconnect("The PC connection ended. Is the cable plugged in and EtherShare open on the PC?");
     }
 
     private Builder buildVpn() {
@@ -200,46 +360,6 @@ public class TunnelService extends VpnService {
         return b;
     }
 
-    /** Thor -> PC: each packet from the VPN, prefixed by its length, in one write. */
-    private void pumpUp() {
-        byte[] buf = new byte[MTU + 2];
-        try {
-            FileInputStream in = new FileInputStream(tun.getFileDescriptor());
-            OutputStream out = socket.getOutputStream();
-            while (!stopping) {
-                int n = in.read(buf, 2, MTU);
-                if (n <= 0) continue;
-                buf[0] = (byte) (n >> 8);
-                buf[1] = (byte) n;
-                out.write(buf, 0, n + 2);
-                bytesUp.addAndGet(n);
-            }
-        } catch (IOException | RuntimeException e) {
-            // The socket or VPN closed: pumpDown notices and ends the connection.
-        }
-        try {
-            if (socket != null) socket.shutdownInput();
-        } catch (IOException ignored) {
-        }
-    }
-
-    /** PC -> Thor: one packet per write into the VPN. */
-    private void pumpDown(DataInputStream in) {
-        byte[] buf = new byte[65536];
-        try {
-            FileOutputStream out = new FileOutputStream(tun.getFileDescriptor());
-            while (!stopping) {
-                int n = in.readUnsignedShort();
-                if (n == 0) continue;
-                in.readFully(buf, 0, n);
-                out.write(buf, 0, n);
-                bytesDown.addAndGet(n);
-            }
-        } catch (IOException | RuntimeException e) {
-            // Unplugged, or the PC program closed.
-        }
-    }
-
     /** Ends the connection. reason = null when the user chose to. */
     private synchronized void disconnect(String reason) {
         if (stopping && state == IDLE) return;
@@ -250,15 +370,17 @@ public class TunnelService extends VpnService {
             unregisterReceiver(usbState);
         } catch (IllegalArgumentException ignored) {
         }
-        try {
-            if (socket != null) socket.close();
-        } catch (IOException ignored) {
+        for (LocalSocket so : sockets) {
+            try {
+                so.close();
+            } catch (IOException ignored) {
+            }
         }
         try {
             if (tun != null) tun.close();
         } catch (IOException ignored) {
         }
-        socket = null;
+        sockets = new LocalSocket[0];
         tun = null;
         lastError = reason;
         state = IDLE;

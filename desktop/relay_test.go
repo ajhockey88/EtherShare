@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,17 +29,30 @@ type fakeThor struct {
 	cancel context.CancelFunc
 }
 
-func newFakeThor(t *testing.T, conn net.Conn) *fakeThor {
+// newFakeThor speaks version 1 over one conn, or version 2 dealing packets across all conns.
+func newFakeThor(t *testing.T, version byte, conns []net.Conn) *fakeThor {
 	t.Helper()
-	conn.Write([]byte{'E', 'T', 'H', 'S', protoVersion})
-	head := make([]byte, 6)
-	if _, err := io.ReadFull(conn, head); err != nil || string(head[:4]) != protoMagic {
-		t.Fatalf("bad welcome %q %v", head, err)
+	session := uint64(time.Now().UnixNano())
+	for i, conn := range conns {
+		h := []byte{'E', 'T', 'H', 'S', version}
+		if version >= 2 {
+			h = binary.BigEndian.AppendUint64(h, session)
+			h = append(h, byte(i), byte(len(conns)))
+		}
+		conn.Write(h)
+		head := make([]byte, 6)
+		if _, err := io.ReadFull(conn, head); err != nil || string(head[:4]) != protoMagic || head[4] != version {
+			t.Fatalf("bad welcome %q %v", head, err)
+		}
+		name := make([]byte, head[5])
+		io.ReadFull(conn, name)
+		if string(name) != "test-pc" {
+			t.Fatalf("PC name %q", name)
+		}
 	}
-	name := make([]byte, head[5])
-	io.ReadFull(conn, name)
-	if string(name) != "test-pc" {
-		t.Fatalf("PC name %q", name)
+	hl := 2
+	if version >= 2 {
+		hl = 6
 	}
 
 	s := stack.New(stack.Options{
@@ -53,64 +67,166 @@ func newFakeThor(t *testing.T, conn net.Conn) *fakeThor {
 	}, stack.AddressProperties{})
 	s.SetRouteTable([]tcpip.Route{{Destination: header.IPv4EmptySubnet, NIC: 1}})
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { // Thor -> PC
-		w := bufio.NewWriter(conn)
-		for {
+
+	// Thor -> PC: numbered and dealt round robin, a writer per stream.
+	queues := make([]chan []byte, len(conns))
+	for i, conn := range conns {
+		queues[i] = make(chan []byte, 256)
+		go func(q chan []byte, w *bufio.Writer) {
+			for f := range q {
+				w.Write(f)
+				if len(q) == 0 {
+					w.Flush()
+				}
+			}
+		}(queues[i], bufio.NewWriter(conn))
+	}
+	go func() {
+		var seq uint32
+		for i := 0; ; i++ {
 			pkt := ep.ReadContext(ctx)
 			if pkt == nil {
 				return
 			}
 			v := pkt.ToView()
 			pkt.DecRef()
-			var n [2]byte
-			binary.BigEndian.PutUint16(n[:], uint16(v.Size()))
-			w.Write(n[:])
-			v.WriteTo(w)
-			if ep.NumQueued() == 0 {
-				w.Flush()
+			f := make([]byte, hl+v.Size())
+			binary.BigEndian.PutUint16(f, uint16(v.Size()))
+			if hl == 6 {
+				binary.BigEndian.PutUint32(f[2:], seq)
+				seq++
 			}
+			v.Read(f[hl:])
+			queues[i%len(queues)] <- f
 		}
 	}()
-	go func() { // PC -> Thor
-		r := bufio.NewReader(conn)
-		var n [2]byte
-		for {
-			if _, err := io.ReadFull(r, n[:]); err != nil {
-				return
+
+	// PC -> Thor: each stream's packets, put back in order.
+	var mu sync.Mutex
+	var next uint32
+	pending := map[uint32][]byte{}
+	inject := func(p []byte) {
+		pb := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(p)})
+		ep.InjectInbound(header.IPv4ProtocolNumber, pb)
+		pb.DecRef()
+	}
+	for _, conn := range conns {
+		go func(r *bufio.Reader) {
+			head := make([]byte, 6)
+			for {
+				if _, err := io.ReadFull(r, head[:hl]); err != nil {
+					return
+				}
+				p := make([]byte, binary.BigEndian.Uint16(head))
+				if _, err := io.ReadFull(r, p); err != nil {
+					return
+				}
+				mu.Lock()
+				if hl == 2 {
+					inject(p)
+				} else if seq := binary.BigEndian.Uint32(head[2:]); seq != next {
+					pending[seq] = p
+				} else {
+					for ok := true; ok; p, ok = pending[next] {
+						delete(pending, next)
+						inject(p)
+						next++
+					}
+				}
+				mu.Unlock()
 			}
-			p := make([]byte, binary.BigEndian.Uint16(n[:]))
-			if _, err := io.ReadFull(r, p); err != nil {
-				return
-			}
-			pb := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(p)})
-			ep.InjectInbound(header.IPv4ProtocolNumber, pb)
-			pb.DecRef()
-		}
-	}()
+		}(bufio.NewReader(conn))
+	}
 	return &fakeThor{s: s, cancel: cancel}
 }
 
+// stopAndWait is a stand-in for one ADB stream: it passes at most chunk bytes at a time, and
+// waits rtt for the far end's go-ahead before reading the next chunk.
+func stopAndWait(t *testing.T, target string, chunk int, rtt time.Duration) string {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	pipe := func(dst, src net.Conn) {
+		buf := make([]byte, chunk)
+		for {
+			n, err := src.Read(buf)
+			if err != nil {
+				dst.Close()
+				return
+			}
+			if _, err := dst.Write(buf[:n]); err != nil {
+				src.Close()
+				return
+			}
+			time.Sleep(rtt)
+		}
+	}
+	go func() {
+		for {
+			a, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			b, err := net.Dial("tcp", target)
+			if err != nil {
+				a.Close()
+				continue
+			}
+			go pipe(a, b)
+			go pipe(b, a)
+		}
+	}()
+	return ln.Addr().String()
+}
+
+type relayOpts struct {
+	version byte
+	streams int
+	// When set, each stream goes through a stopAndWait stand-in for ADB.
+	chunk int
+	rtt   time.Duration
+}
+
 func startRelay(t *testing.T, dns string) (*fakeThor, *Stats) {
+	return startRelayWith(t, dns, relayOpts{version: protoVersion, streams: 8})
+}
+
+func startRelayWith(t *testing.T, dns string, o relayOpts) (*fakeThor, *Stats) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	stats := &Stats{}
+	relay := &Relay{PCName: "test-pc", Stats: stats, DNS: func() string { return dns }}
 	go func() {
-		c, err := ln.Accept()
-		if err != nil {
-			return
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go relay.Handle(c)
 		}
-		Serve(c, "test-pc", stats, func() string { return dns })
 	}()
-	conn, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
+	addr := ln.Addr().String()
+	if o.chunk > 0 {
+		addr = stopAndWait(t, addr, o.chunk, o.rtt)
 	}
-	thor := newFakeThor(t, conn)
+	var conns []net.Conn
+	for i := 0; i < o.streams; i++ {
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conns = append(conns, conn)
+	}
+	thor := newFakeThor(t, o.version, conns)
 	t.Cleanup(func() {
 		thor.cancel()
-		conn.Close()
+		for _, c := range conns {
+			c.Close()
+		}
 		ln.Close()
 	})
 	return thor, stats
@@ -120,8 +236,10 @@ func gatewayAddr(port int) tcpip.FullAddress {
 	return tcpip.FullAddress{NIC: 1, Addr: gateway4, Port: uint16(port)}
 }
 
-func TestTCPDownloadThroughTunnel(t *testing.T) {
-	const total = 64 << 20
+// download fetches total bytes from a local server through the tunnel, checks them, and
+// returns the speed in Mbps.
+func download(t *testing.T, total int, start func() *fakeThor) float64 {
+	t.Helper()
 	payload := make([]byte, 1<<20)
 	rand.Read(payload)
 	server, _ := net.Listen("tcp", "127.0.0.1:0")
@@ -138,14 +256,14 @@ func TestTCPDownloadThroughTunnel(t *testing.T) {
 			}
 		}
 	}()
-	thor, stats := startRelay(t, "")
+	thor := start()
 	port := server.Addr().(*net.TCPAddr).Port
 	c, err := gonet.DialTCP(thor.s, gatewayAddr(port), header.IPv4ProtocolNumber)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	start := time.Now()
+	began := time.Now()
 	got := make([]byte, 1<<20)
 	n := 0
 	for {
@@ -160,12 +278,45 @@ func TestTCPDownloadThroughTunnel(t *testing.T) {
 			break
 		}
 	}
-	secs := time.Since(start).Seconds()
 	if n != total {
 		t.Fatalf("got %d bytes, want %d", n, total)
 	}
-	t.Logf("%d MB in %.2fs = %.0f Mbps through the relay (down counter %d MB)",
-		n>>20, secs, float64(n)*8/secs/1e6, stats.Down.Load()>>20)
+	return float64(n) * 8 / time.Since(began).Seconds() / 1e6
+}
+
+func TestTCPDownloadThroughTunnel(t *testing.T) {
+	var stats *Stats
+	mbps := download(t, 64<<20, func() *fakeThor {
+		thor, s := startRelay(t, "")
+		stats = s
+		return thor
+	})
+	t.Logf("%.0f Mbps through the relay over 8 streams (down counter %d MB)", mbps, stats.Down.Load()>>20)
+}
+
+func TestVersion1AppStillWorks(t *testing.T) {
+	mbps := download(t, 16<<20, func() *fakeThor {
+		thor, _ := startRelayWith(t, "", relayOpts{version: 1, streams: 1})
+		return thor
+	})
+	t.Logf("%.0f Mbps over one version 1 stream", mbps)
+}
+
+// Through stop-and-wait links like ADB's, several streams together beat one, even for a
+// single download, because the packets are dealt across them and put back in order.
+func TestStreamsBeatStopAndWait(t *testing.T) {
+	speed := func(streams int) float64 {
+		return download(t, 16<<20, func() *fakeThor {
+			thor, _ := startRelayWith(t, "", relayOpts{version: protoVersion, streams: streams,
+				chunk: 64 << 10, rtt: 2 * time.Millisecond})
+			return thor
+		})
+	}
+	one, eight := speed(1), speed(8)
+	t.Logf("one stream %.0f Mbps, eight streams %.0f Mbps", one, eight)
+	if eight < 2*one {
+		t.Fatalf("eight streams (%.0f Mbps) weren't much faster than one (%.0f Mbps)", eight, one)
+	}
 }
 
 func TestTCPUploadAndHalfClose(t *testing.T) {

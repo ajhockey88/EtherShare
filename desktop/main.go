@@ -85,23 +85,30 @@ func run(port int, adbPath string, noADB bool) error {
 
 	var active atomic.Int32
 	stats := &Stats{}
+	relay := &Relay{
+		PCName: pcName,
+		Stats:  stats,
+		DNS:    pcDNS,
+		OnConnect: func() {
+			logf("Thor connected. It's now using this PC's internet (%d connected).", active.Add(1))
+		},
+		OnDisconnect: func(err error) {
+			active.Add(-1)
+			if err != nil {
+				logf("Thor disconnected: %v", err)
+			} else {
+				logf("Thor disconnected.")
+			}
+		},
+		OnRefused: func(err error) { logf("Turned away a connection from the Thor: %v", err) },
+	}
 	go func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			go func() {
-				n := active.Add(1)
-				logf("Thor connected. It's now using this PC's internet (%d connected).", n)
-				err := Serve(conn, pcName, stats, pcDNS)
-				n = active.Add(-1)
-				if err != nil {
-					logf("Thor disconnected: %v", err)
-				} else {
-					logf("Thor disconnected.")
-				}
-			}()
+			go relay.Handle(conn)
 		}
 	}()
 	go showSpeed(stats, &active)
